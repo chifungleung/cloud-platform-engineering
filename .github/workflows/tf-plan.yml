@@ -1,0 +1,104 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    paths:
+      - 'terraform/**'
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+  pull-requests: write
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      stacks: ${{ steps.detect.outputs.stacks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed Terragrunt stacks
+        id: detect
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep 'terraform/live/' \
+            | grep 'terragrunt.hcl' \
+            | xargs -I{} dirname {} \
+            | sort -u)
+
+          if [ -z "$CHANGED" ]; then
+            echo "stacks=[]" >> $GITHUB_OUTPUT
+          else
+            JSON=$(echo "$CHANGED" | jq -R -s -c 'split("\n") | map(select(. != ""))')
+            echo "stacks=$JSON" >> $GITHUB_OUTPUT
+          fi
+
+  plan:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.stacks != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        stack: ${{ fromJson(needs.detect-changes.outputs.stacks) }}
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve account ID from stack path
+        id: account
+        run: |
+          STACK="${{ matrix.stack }}"
+          # Extract env segment (dev|stage|prod) from path
+          ENV=$(echo "$STACK" | grep -oP '(?<=live/aws/)(dev|stage|prod)')
+          case "$ENV" in
+            dev)   echo "account_id=111111111111" >> $GITHUB_OUTPUT ;;
+            stage) echo "account_id=222222222222" >> $GITHUB_OUTPUT ;;
+            prod)  echo "account_id=333333333333" >> $GITHUB_OUTPUT ;;
+          esac
+          echo "env=$ENV" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ steps.account.outputs.account_id }}:role/github-actions-terraform-readonly
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+          terraform_wrapper: false
+
+      - name: Setup Terragrunt
+        run: |
+          curl -sSL https://github.com/gruntwork-io/terragrunt/releases/download/v0.67.0/terragrunt_linux_amd64 \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Plan
+        id: plan
+        working-directory: ${{ matrix.stack }}
+        run: terragrunt plan -no-color 2>&1 | tee plan.txt
+        continue-on-error: true
+
+      - name: Post plan to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ matrix.stack }}/plan.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.slice(0, 60000) + '\n...(truncated)' : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform Plan: \`${{ matrix.stack }}\`\n\`\`\`hcl\n${truncated}\n\`\`\``
+            });
+
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

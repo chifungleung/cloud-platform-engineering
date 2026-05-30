@@ -1,0 +1,152 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      dev_stacks:   ${{ steps.detect.outputs.dev_stacks }}
+      stage_stacks: ${{ steps.detect.outputs.stage_stacks }}
+      prod_stacks:  ${{ steps.detect.outputs.prod_stacks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed stacks per environment
+        id: detect
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD \
+            | grep 'terraform/live/' \
+            | grep 'terragrunt.hcl' \
+            | xargs -I{} dirname {} \
+            | sort -u)
+
+          filter_env() {
+            echo "$CHANGED" | grep "live/aws/$1/" | jq -R -s -c 'split("\n") | map(select(. != ""))'
+          }
+
+          echo "dev_stacks=$(filter_env dev)"     >> $GITHUB_OUTPUT
+          echo "stage_stacks=$(filter_env stage)" >> $GITHUB_OUTPUT
+          echo "prod_stacks=$(filter_env prod)"   >> $GITHUB_OUTPUT
+
+  # ── Dev (no approval gate) ──────────────────────────────────────────────────
+  apply-dev:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.dev_stacks != '[]'
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      matrix:
+        stack: ${{ fromJson(needs.detect-changes.outputs.dev_stacks) }}
+      max-parallel: 2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::111111111111:role/github-actions-terraform
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+          terraform_wrapper: false
+
+      - name: Setup Terragrunt
+        run: |
+          curl -sSL https://github.com/gruntwork-io/terragrunt/releases/download/v0.67.0/terragrunt_linux_amd64 \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Apply
+        working-directory: ${{ matrix.stack }}
+        run: terragrunt apply -auto-approve -no-color
+
+  # ── Stage (requires dev to pass) ────────────────────────────────────────────
+  apply-stage:
+    needs: [detect-changes, apply-dev]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.stage_stacks != '[]' &&
+      (needs.apply-dev.result == 'success' || needs.apply-dev.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: stage
+    strategy:
+      matrix:
+        stack: ${{ fromJson(needs.detect-changes.outputs.stage_stacks) }}
+      max-parallel: 2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::222222222222:role/github-actions-terraform
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+          terraform_wrapper: false
+
+      - name: Setup Terragrunt
+        run: |
+          curl -sSL https://github.com/gruntwork-io/terragrunt/releases/download/v0.67.0/terragrunt_linux_amd64 \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Apply
+        working-directory: ${{ matrix.stack }}
+        run: terragrunt apply -auto-approve -no-color
+
+  # ── Prod (requires stage to pass + manual approval via GitHub Environment) ──
+  apply-prod:
+    needs: [detect-changes, apply-stage]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.prod_stacks != '[]' &&
+      (needs.apply-stage.result == 'success' || needs.apply-stage.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: prod   # ← GitHub Environment with required reviewers configured
+    strategy:
+      matrix:
+        stack: ${{ fromJson(needs.detect-changes.outputs.prod_stacks) }}
+      max-parallel: 1   # serial for prod
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::333333333333:role/github-actions-terraform
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+          terraform_wrapper: false
+
+      - name: Setup Terragrunt
+        run: |
+          curl -sSL https://github.com/gruntwork-io/terragrunt/releases/download/v0.67.0/terragrunt_linux_amd64 \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Apply
+        working-directory: ${{ matrix.stack }}
+        run: terragrunt apply -auto-approve -no-color
