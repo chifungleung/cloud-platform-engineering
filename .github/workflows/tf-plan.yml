@@ -6,7 +6,7 @@ on:
       - 'terraform/**'
 
 permissions:
-  id-token: write   # required for OIDC
+  id-token: write
   contents: read
   pull-requests: write
 
@@ -48,20 +48,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve account ID from stack path
+      - name: Resolve account ID and environment
         id: account
         run: |
-          STACK="${{ matrix.stack }}"
-          # Extract env segment (dev|stage|prod) from path
-          ENV=$(echo "$STACK" | grep -oP '(?<=live/aws/)(dev|stage|prod)')
-          case "$ENV" in
-            dev)   echo "account_id=111111111111" >> $GITHUB_OUTPUT ;;
-            stage) echo "account_id=222222222222" >> $GITHUB_OUTPUT ;;
-            prod)  echo "account_id=333333333333" >> $GITHUB_OUTPUT ;;
-          esac
-          echo "env=$ENV" >> $GITHUB_OUTPUT
+          ACCOUNT_ID=$(bash scripts/get-account-id.sh "${{ matrix.stack }}")
+          ENV=$(echo "${{ matrix.stack }}" | grep -oP 'live/aws/\K(dev|stage|prod)')
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+          echo "env=$ENV"               >> $GITHUB_OUTPUT
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (OIDC — read-only)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ steps.account.outputs.account_id }}:role/github-actions-terraform-readonly

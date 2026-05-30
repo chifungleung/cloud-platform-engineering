@@ -40,7 +40,7 @@ jobs:
           echo "stage_stacks=$(filter_env stage)" >> $GITHUB_OUTPUT
           echo "prod_stacks=$(filter_env prod)"   >> $GITHUB_OUTPUT
 
-  # ── Dev (no approval gate) ──────────────────────────────────────────────────
+  # ── Dev ─────────────────────────────────────────────────────────────────────
   apply-dev:
     needs: detect-changes
     if: needs.detect-changes.outputs.dev_stacks != '[]'
@@ -54,10 +54,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve account ID
+        id: account
+        run: |
+          echo "account_id=$(bash scripts/get-account-id.sh '${{ matrix.stack }}')" >> $GITHUB_OUTPUT
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::111111111111:role/github-actions-terraform
+          role-to-assume: arn:aws:iam::${{ steps.account.outputs.account_id }}:role/github-actions-terraform
           aws-region: us-east-1
 
       - uses: hashicorp/setup-terraform@v3
@@ -92,10 +97,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve account ID
+        id: account
+        run: |
+          echo "account_id=$(bash scripts/get-account-id.sh '${{ matrix.stack }}')" >> $GITHUB_OUTPUT
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::222222222222:role/github-actions-terraform
+          role-to-assume: arn:aws:iam::${{ steps.account.outputs.account_id }}:role/github-actions-terraform
           aws-region: us-east-1
 
       - uses: hashicorp/setup-terraform@v3
@@ -113,7 +123,7 @@ jobs:
         working-directory: ${{ matrix.stack }}
         run: terragrunt apply -auto-approve -no-color
 
-  # ── Prod (requires stage to pass + manual approval via GitHub Environment) ──
+  # ── Prod (requires stage to pass + manual approval) ─────────────────────────
   apply-prod:
     needs: [detect-changes, apply-stage]
     if: |
@@ -121,19 +131,24 @@ jobs:
       needs.detect-changes.outputs.prod_stacks != '[]' &&
       (needs.apply-stage.result == 'success' || needs.apply-stage.result == 'skipped')
     runs-on: ubuntu-latest
-    environment: prod   # ← GitHub Environment with required reviewers configured
+    environment: prod
     strategy:
       matrix:
         stack: ${{ fromJson(needs.detect-changes.outputs.prod_stacks) }}
-      max-parallel: 1   # serial for prod
+      max-parallel: 1
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve account ID
+        id: account
+        run: |
+          echo "account_id=$(bash scripts/get-account-id.sh '${{ matrix.stack }}')" >> $GITHUB_OUTPUT
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::333333333333:role/github-actions-terraform
+          role-to-assume: arn:aws:iam::${{ steps.account.outputs.account_id }}:role/github-actions-terraform
           aws-region: us-east-1
 
       - uses: hashicorp/setup-terraform@v3

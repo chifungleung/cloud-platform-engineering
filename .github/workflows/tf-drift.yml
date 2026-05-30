@@ -11,26 +11,41 @@ permissions:
   issues: write
 
 jobs:
+  # Discover all account.hcl files and build a matrix of account paths
+  discover-accounts:
+    runs-on: ubuntu-latest
+    outputs:
+      accounts: ${{ steps.discover.outputs.accounts }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Discover all accounts
+        id: discover
+        run: |
+          # Find every account.hcl and emit {path, env, account_id} objects
+          ACCOUNTS=$(find terraform/live/aws -name account.hcl | while read f; do
+            DIR=$(dirname "$f")
+            ENV=$(echo "$DIR" | grep -oP 'live/aws/\K(dev|stage|prod)')
+            ACCOUNT_ID=$(grep 'account_id' "$f" | grep -oP '"[0-9]{12}"' | tr -d '"')
+            echo "{\"path\":\"$DIR\",\"env\":\"$ENV\",\"account_id\":\"$ACCOUNT_ID\"}"
+          done | jq -s -c '.')
+          echo "accounts=$ACCOUNTS" >> $GITHUB_OUTPUT
+
   drift:
+    needs: discover-accounts
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          - env: dev
-            account_id: "111111111111"
-          - env: stage
-            account_id: "222222222222"
-          - env: prod
-            account_id: "333333333333"
+        account: ${{ fromJson(needs.discover-accounts.outputs.accounts) }}
       fail-fast: false
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (OIDC — read-only)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ matrix.account_id }}:role/github-actions-terraform-readonly
+          role-to-assume: arn:aws:iam::${{ matrix.account.account_id }}:role/github-actions-terraform-readonly
           aws-region: us-east-1
 
       - uses: hashicorp/setup-terraform@v3
@@ -46,11 +61,10 @@ jobs:
 
       - name: Run drift detection
         id: drift
-        working-directory: terraform/live/aws/${{ matrix.env }}
+        working-directory: ${{ matrix.account.path }}
         run: |
           terragrunt run-all plan -detailed-exitcode -no-color 2>&1 | tee drift.txt
           EXIT=${PIPESTATUS[0]}
-          # exit code 2 = drift detected
           echo "drift_detected=$([ $EXIT -eq 2 ] && echo true || echo false)" >> $GITHUB_OUTPUT
         continue-on-error: true
 
@@ -60,12 +74,12 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const output = fs.readFileSync('terraform/live/aws/${{ matrix.env }}/drift.txt', 'utf8');
+            const output = fs.readFileSync('${{ matrix.account.path }}/drift.txt', 'utf8');
             const truncated = output.length > 60000 ? output.slice(0, 60000) + '\n...(truncated)' : output;
             github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `[Drift] ${{ matrix.env }} — ${new Date().toISOString().slice(0,10)}`,
-              labels: ['terraform-drift', '${{ matrix.env }}'],
-              body: `Drift detected in \`${{ matrix.env }}\` account during nightly scan.\n\n\`\`\`\n${truncated}\n\`\`\``
+              title: `[Drift] ${{ matrix.account.account.account_id }} (${{ matrix.account.env }}) — ${new Date().toISOString().slice(0,10)}`,
+              labels: ['terraform-drift', '${{ matrix.account.env }}'],
+              body: `Drift detected in account \`${{ matrix.account.account_id }}\` (\`${{ matrix.account.env }}\`) during nightly scan.\n\n\`\`\`\n${truncated}\n\`\`\``
             });

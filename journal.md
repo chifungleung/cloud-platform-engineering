@@ -149,15 +149,81 @@ Each account has an IAM role `github-actions-terraform` with:
 ## 2026-05-30 — Scaffolding Complete
 
 All files created. Structure is live and ready for real account IDs to be substituted into:
-- `terraform/live/aws/dev/account.hcl` — replace `111111111111`
+- `terraform/live/aws/dev/public-web-app-dev-01/account.hcl` — replace `444444444444`
 - `terraform/live/aws/stage/account.hcl` — replace `222222222222`
 - `terraform/live/aws/prod/account.hcl` — replace `333333333333`
-- `.github/workflows/tf-apply.yml` — account IDs hardcoded in role ARNs (3 locations)
-- `.github/workflows/tf-drift.yml` — account IDs in matrix (3 locations)
 
 **First-run order for a new account:**
 1. Run `scripts/bootstrap/bootstrap-account.sh <account-id> us-east-1 <profile>` to create S3 + DynamoDB
 2. Create `github-actions-terraform` and `github-actions-terraform-readonly` IAM roles with OIDC trust
 3. Run `terragrunt plan` from any stack directory to verify state backend connectivity
+
+---
+
+## 2026-05-30 — Onboard `public-web-app-dev-01` (DEV OU)
+
+### What changed
+
+**Structural change — multi-account OU layout:**
+The initial scaffold assumed one account per OU (`dev/account.hcl` directly). With multiple named accounts needed under a single OU, an account-name level was inserted into the hierarchy:
+
+```
+Before: live/aws/dev/us-east-1/vpc/
+After:  live/aws/dev/<account-name>/us-east-1/vpc/
+```
+
+This change was applied to `dev/` immediately. `stage/` and `prod/` will be restructured when their first named account is onboarded.
+
+**New account: `public-web-app-dev-01`**
+| File | Purpose |
+|---|---|
+| `live/aws/dev/public-web-app-dev-01/account.hcl` | Account ID `444444444444` (placeholder), OU tag `dev` |
+| `live/aws/dev/public-web-app-dev-01/us-east-1/region.hcl` | Region declaration |
+| `live/aws/dev/public-web-app-dev-01/us-east-1/vpc/terragrunt.hcl` | VPC — CIDR `10.10.0.0/16`, 2 AZs, public + private subnets |
+| `live/aws/dev/public-web-app-dev-01/us-east-1/ec2/terragrunt.hcl` | EC2 web server — depends on VPC via `dependency` block |
+
+**New module: `modules/aws/ec2`**
+- EC2 instance with IMDSv2 enforced, encrypted EBS, SSM agent IAM role attached
+- Configurable security group via `ingress_rules` input
+- IAM instance profile included — no need to manage separately
+
+**Workflow improvements — dynamic account ID resolution:**
+- Removed hardcoded account IDs from all three workflows
+- Added `scripts/get-account-id.sh` — walks up the directory tree from any stack path to find the nearest `account.hcl` and extracts the `account_id`
+- `tf-drift.yml` now auto-discovers all `account.hcl` files at runtime — no changes required to the workflow when a new account is added
+
+### Bootstrap steps for `public-web-app-dev-01`
+
+1. Replace placeholder account ID in `account.hcl`:
+   ```hcl
+   account_id = "444444444444"  →  actual 12-digit account ID
+   ```
+
+2. Bootstrap state backend:
+   ```bash
+   ./scripts/bootstrap/bootstrap-account.sh <actual-account-id> us-east-1 public-web-app-dev-01
+   ```
+
+3. Create OIDC IAM roles in the account:
+   - `github-actions-terraform` (apply — trust: `repo:*:ref:refs/heads/main`)
+   - `github-actions-terraform-readonly` (plan — trust: `repo:*:*`)
+
+4. Verify connectivity:
+   ```bash
+   cd terraform/live/aws/dev/public-web-app-dev-01/us-east-1/vpc
+   terragrunt plan
+   ```
+
+5. Open a PR touching the new stacks to trigger `tf-plan.yml` and confirm the workflow resolves the correct account.
+
+### Next Steps
+
+- [ ] Replace placeholder account ID `444444444444` with real account ID
+- [ ] Run bootstrap script for `public-web-app-dev-01`
+- [ ] Create OIDC IAM roles in `public-web-app-dev-01`
+- [ ] Restructure `stage/` and `prod/` to named-account layout when first account is onboarded
+- [ ] Document OIDC trust policy and IAM role setup
+- [ ] Write remaining modules: `rds`, `iam-role`, `s3`, `security-group`
+- [ ] Set up GitHub Environments (dev/stage/prod) with required reviewers for prod
 
 ---
