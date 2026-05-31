@@ -224,6 +224,67 @@ This change was applied to `dev/` immediately. `stage/` and `prod/` will be rest
 - [ ] Restructure `stage/` and `prod/` to named-account layout when first account is onboarded
 - [ ] Document OIDC trust policy and IAM role setup
 - [ ] Write remaining modules: `rds`, `iam-role`, `s3`, `security-group`
-- [ ] Set up GitHub Environments (dev/stage/prod) with required reviewers for prod
+- [x] Set up GitHub Environments (dev/stage/prod) with required reviewers for prod
+- [x] Enable branch protection on `main`
+- [x] Adopt feature branch + PR workflow for all future changes
+
+---
+
+## 2026-05-30 — Branch Protection & PR Workflow
+
+### Branch protection rules applied to `main`
+
+Configured via GitHub API (`gh api`):
+
+| Rule | Setting |
+|---|---|
+| Require pull request before merging | ✅ — no direct pushes to `main` |
+| Required approving reviews | 1 |
+| Dismiss stale reviews on new push | ✅ — re-approval required if the branch changes |
+| Required status checks | `Terraform Plan` must pass |
+| Require branches to be up to date | ✅ — branch must be current with `main` before merge |
+| Require linear history | ✅ — no merge commits, clean git log |
+| Allow force pushes | ❌ |
+| Allow deletions | ❌ |
+
+### Why this matters
+
+Every merge to `main` triggers `tf-apply.yml` which deploys real infrastructure. Without branch protection:
+- Bad commits could apply directly to infrastructure with no review
+- `tf-plan.yml` (plan-on-PR) would never fire — no plan output to review
+- The prod approval gate would be bypassed entirely
+
+### Agreed branching strategy going forward
+
+All changes — including account onboarding, module updates, and workflow changes — must go through a feature branch and PR.
+
+**Branch naming convention:**
+
+| Prefix | Use case | Example |
+|---|---|---|
+| `feat/` | New account, new module, new stack | `feat/onboard-public-api-stage-01` |
+| `fix/` | Bug fix in a module or stack | `fix/dev-vpc-nat-gateway` |
+| `chore/` | Tooling, version bumps, workflow tweaks | `chore/update-terragrunt-0.68` |
+
+**Day-to-day workflow:**
+
+```bash
+# 1. Branch from latest main
+git checkout main && git pull
+git checkout -b feat/<description>
+
+# 2. Make changes and commit
+git add <files>
+git commit -m "feat: <description>"
+
+# 3. Push and open PR — tf-plan.yml fires automatically
+git push -u origin feat/<description>
+gh pr create --base main
+
+# 4. Review plan output posted as PR comment
+# 5. Get approval → merge → tf-apply.yml deploys dev → stage → prod
+```
+
+> **Note:** The two bootstrap commits (`4cb3784`, `f16a880`) were made directly to `main` before branch protection was in place. All subsequent changes will follow the PR workflow.
 
 ---
