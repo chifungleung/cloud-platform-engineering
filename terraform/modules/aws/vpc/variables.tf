@@ -30,3 +30,9 @@ variable "enable_nat_gateway" {
   type        = bool
   default     = true
 }
+
+variable "use_transit_gateway_egress" {
+  description = "When true, skip the NAT default route in private route tables (a TGW attachment will provide egress instead)."
+  type        = bool
+  default     = false
+}

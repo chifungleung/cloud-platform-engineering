@@ -388,3 +388,67 @@ Separate from the existing management VPC (`10.20.0.0/16`) in the same account.
 
 ---
 
+## 2026-06-01 — Transit Gateway for DEV OU Hub-and-Spoke Egress via NFW
+
+### Context & Decisions
+
+With the egress VPC and NFW in place, the next step is connecting DEV OU account VPCs to it via a Transit Gateway so all egress flows through the centralized inspection path.
+
+**Traffic flow:**
+```
+Spoke private subnet → TGW → Egress VPC TGW attachment subnets
+  → NFW endpoint (wired by network-firewall module)
+  → NAT Gateway → Internet
+```
+
+**Key decisions:**
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| TGW placement | `network-dev` account | Co-located with egress VPC; minimizes cross-account hops |
+| Hub attachment subnets | Egress VPC TGW attachment subnets (already provisioned) | Dedicated /28s per AZ — isolated from firewall and public tiers |
+| RAM sharing | OU-level principal ARN | Share once with the DEV OU; new accounts inherit automatically |
+| Spoke NAT removal | `enable_nat_gateway = false` in spoke VPC stacks | Prevents bypass of hub; saves cost |
+| Route ownership | `tgw-attachment` module adds `0.0.0.0/0 → TGW` to spoke private RTs | Keeps VPC module clean; avoids circular deps |
+| VPC module inline routes | Moved to separate `aws_route` resource guarded by `use_transit_gateway_egress` | Prevents Terraform conflict when tgw-attachment adds its own `0.0.0.0/0` |
+
+### What changed
+
+**New modules:**
+| Module | Purpose |
+|---|---|
+| `modules/aws/transit-gateway/` | Creates TGW, hub VPC attachment (egress VPC), RAM share + principal association |
+| `modules/aws/tgw-attachment/` | Creates spoke VPC attachment + `0.0.0.0/0 → TGW` route in private route tables |
+
+**Updated module:**
+- `modules/aws/vpc/` — private RT NAT route moved to separate `aws_route` resource; added `private_route_table_id` output and `use_transit_gateway_egress` variable
+
+**New stacks:**
+| Stack | Purpose |
+|---|---|
+| `dev/network-dev/us-east-1/transit-gateway/` | Deploys TGW, attaches egress VPC, shares with DEV OU via RAM |
+| `dev/public-web-app-dev-01/us-east-1/tgw-attachment/` | Attaches spoke VPC to TGW; routes `0.0.0.0/0` to TGW |
+
+**Updated stack:**
+- `dev/public-web-app-dev-01/us-east-1/vpc/` — `enable_nat_gateway = false`, `use_transit_gateway_egress = true`
+
+### Cross-account state dependency
+
+The `tgw-attachment` stack in spoke accounts reads the TGW ID from `network-dev`'s remote state via a cross-account Terragrunt `dependency` block. The `github-actions-terraform` role in each spoke account needs `s3:GetObject` on `tf-state-<network-dev-account-id>` for CI to resolve this.
+
+### Apply order
+
+1. `network-dev/us-east-1/transit-gateway` — creates TGW and RAM share
+2. Accept RAM share in spoke account(s) if org-level auto-accept is not enabled
+3. `public-web-app-dev-01/us-east-1/vpc` — removes NAT Gateway
+4. `public-web-app-dev-01/us-east-1/tgw-attachment` — attaches VPC, adds default route
+
+### Next Steps
+
+- [ ] Replace placeholder OU ARN in `transit-gateway/terragrunt.hcl` with real DEV OU ARN
+- [ ] Grant spoke account IAM roles `s3:GetObject` on `tf-state-<network-dev-account-id>`
+- [ ] Confirm RAM share auto-accept is enabled at organization level (or accept manually)
+- [ ] Post-apply: verify spoke EC2 egress IP matches network-dev NAT GW EIP
+
+---
+
