@@ -228,73 +228,6 @@ This change was applied to `dev/` immediately. `stage/` and `prod/` will be rest
 
 ---
 
-## 2026-06-01 — Centralized Egress VPC & AWS Network Firewall (network-dev)
-
-### What was built
-
-Two new Terraform modules and two new live stacks in the `network-dev` account to serve as the centralized egress and inspection point for all accounts in the dev OU.
-
-**New modules:**
-| Module | Path |
-|---|---|
-| `egress-vpc` | `terraform/modules/aws/egress-vpc/` |
-| `network-firewall` | `terraform/modules/aws/network-firewall/` |
-
-**New live stacks:**
-| Stack | Path |
-|---|---|
-| Egress VPC | `terraform/live/aws/dev/network-dev/us-east-1/egress-vpc/` |
-| Network Firewall | `terraform/live/aws/dev/network-dev/us-east-1/network-firewall/` |
-
-### Architecture
-
-A dedicated egress VPC (`10.21.0.0/16`) with three subnet tiers per AZ in `us-east-1a` and `us-east-1b`:
-
-```
-Spoke VPCs → [ TGW ]
-    ↓
-TGW attachment subnets  (10.21.0.0/28, 10.21.0.16/28)
-    ↓  0.0.0.0/0 → firewall endpoint (same AZ)
-Firewall subnets        (10.21.1.0/28, 10.21.1.16/28)
-    ↓  AWS Network Firewall — stateful inspection
-    ↓  0.0.0.0/0 → NAT Gateway (same AZ)
-Public subnets          (10.21.2.0/24, 10.21.3.0/24)
-    ↓  NAT GW → IGW → Internet
-    ↑  return: 10.0.0.0/8 → firewall endpoint (same AZ)
-```
-
-Separate from the existing management VPC (`10.20.0.0/16`) in the same account.
-
-### Firewall policy
-
-- Stateful engine: `STRICT_ORDER`
-- Default action: `DROP_STRICT` (drops unmatched and established traffic)
-- Rule group: two stateful PASS rules — TCP/443 and TCP/80 from `10.0.0.0/8` to any destination
-- All other traffic is dropped by policy default
-
-### Key design decisions
-
-| Decision | Choice | Rationale |
-|---|---|---|
-| Route ownership | `network-firewall` module owns all non-IGW routes | Resolves the chicken-and-egg: firewall endpoint IDs aren't known until after the firewall is created; owning routes in the same module avoids circular dependencies |
-| Per-AZ route tables | One route table per tier per AZ | Firewall endpoint IDs are per-AZ; using a single shared route table would route cross-AZ causing asymmetric flows that AWS drops |
-| Per-AZ NAT Gateways | One NAT GW per AZ | HA — avoids cross-AZ NAT traffic if one AZ goes down |
-| `STRICT_ORDER` | Rule evaluation is ordered by priority | Predictable; PASS rules evaluated before the policy default DROP |
-
-### What's still needed
-
-- [ ] Transit Gateway stack — TGW resource and VPC attachment pointing to `tgw_attachment_subnets`
-- [ ] Spoke VPC route updates — each spoke's `0.0.0.0/0` default route pointed at the TGW
-- [ ] Firewall logging — `aws_networkfirewall_logging_configuration` to CloudWatch Logs (optional follow-up)
-
-### Deployment order
-
-1. `terragrunt apply` in `egress-vpc/` — VPC, subnets, NAT GWs, route tables (IGW default route only)
-2. `terragrunt apply` in `network-firewall/` — firewall, policy, rule group, all remaining routes
-
----
-
-## 2026-05-30 — Branch Protection & PR Workflow
 ## 2026-06-01 — Onboard `network-dev` (DEV OU)
 
 ### Account Onboarding Flow — Feature Branch + PR
@@ -388,3 +321,70 @@ After the PR merges to `main`, complete the one-time account setup:
 - [ ] Add network-specific stacks (TGW, Route 53 Resolver, etc.) as needed
 
 ---
+
+## 2026-06-01 — Centralized Egress VPC & AWS Network Firewall (network-dev)
+
+### What was built
+
+Two new Terraform modules and two new live stacks in the `network-dev` account to serve as the centralized egress and inspection point for all accounts in the dev OU.
+
+**New modules:**
+| Module | Path |
+|---|---|
+| `egress-vpc` | `terraform/modules/aws/egress-vpc/` |
+| `network-firewall` | `terraform/modules/aws/network-firewall/` |
+
+**New live stacks:**
+| Stack | Path |
+|---|---|
+| Egress VPC | `terraform/live/aws/dev/network-dev/us-east-1/egress-vpc/` |
+| Network Firewall | `terraform/live/aws/dev/network-dev/us-east-1/network-firewall/` |
+
+### Architecture
+
+A dedicated egress VPC (`10.21.0.0/16`) with three subnet tiers per AZ in `us-east-1a` and `us-east-1b`:
+
+```
+Spoke VPCs → [ TGW ]
+    ↓
+TGW attachment subnets  (10.21.0.0/28, 10.21.0.16/28)
+    ↓  0.0.0.0/0 → firewall endpoint (same AZ)
+Firewall subnets        (10.21.1.0/28, 10.21.1.16/28)
+    ↓  AWS Network Firewall — stateful inspection
+    ↓  0.0.0.0/0 → NAT Gateway (same AZ)
+Public subnets          (10.21.2.0/24, 10.21.3.0/24)
+    ↓  NAT GW → IGW → Internet
+    ↑  return: 10.0.0.0/8 → firewall endpoint (same AZ)
+```
+
+Separate from the existing management VPC (`10.20.0.0/16`) in the same account.
+
+### Firewall policy
+
+- Stateful engine: `STRICT_ORDER`
+- Default action: `DROP_STRICT` (drops unmatched and established traffic)
+- Rule group: two stateful PASS rules — TCP/443 and TCP/80 from `10.0.0.0/8` to any destination
+- All other traffic is dropped by policy default
+
+### Key design decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Route ownership | `network-firewall` module owns all non-IGW routes | Resolves the chicken-and-egg: firewall endpoint IDs aren't known until after the firewall is created; owning routes in the same module avoids circular dependencies |
+| Per-AZ route tables | One route table per tier per AZ | Firewall endpoint IDs are per-AZ; using a single shared route table would route cross-AZ causing asymmetric flows that AWS drops |
+| Per-AZ NAT Gateways | One NAT GW per AZ | HA — avoids cross-AZ NAT traffic if one AZ goes down |
+| `STRICT_ORDER` | Rule evaluation is ordered by priority | Predictable; PASS rules evaluated before the policy default DROP |
+
+### What's still needed
+
+- [ ] Transit Gateway stack — TGW resource and VPC attachment pointing to `tgw_attachment_subnets`
+- [ ] Spoke VPC route updates — each spoke's `0.0.0.0/0` default route pointed at the TGW
+- [ ] Firewall logging — `aws_networkfirewall_logging_configuration` to CloudWatch Logs (optional follow-up)
+
+### Deployment order
+
+1. `terragrunt apply` in `egress-vpc/` — VPC, subnets, NAT GWs, route tables (IGW default route only)
+2. `terragrunt apply` in `network-firewall/` — firewall, policy, rule group, all remaining routes
+
+---
+
