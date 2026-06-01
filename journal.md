@@ -224,9 +224,7 @@ This change was applied to `dev/` immediately. `stage/` and `prod/` will be rest
 - [ ] Restructure `stage/` and `prod/` to named-account layout when first account is onboarded
 - [ ] Document OIDC trust policy and IAM role setup
 - [ ] Write remaining modules: `rds`, `iam-role`, `s3`, `security-group`
-- [x] Set up GitHub Environments (dev/stage/prod) with required reviewers for prod
-- [x] Enable branch protection on `main`
-- [x] Adopt feature branch + PR workflow for all future changes
+- [ ] Set up GitHub Environments (dev/stage/prod) with required reviewers for prod
 
 ---
 
@@ -297,60 +295,96 @@ Separate from the existing management VPC (`10.20.0.0/16`) in the same account.
 ---
 
 ## 2026-05-30 — Branch Protection & PR Workflow
+## 2026-06-01 — Onboard `network-dev` (DEV OU)
 
-### Branch protection rules applied to `main`
+### Account Onboarding Flow — Feature Branch + PR
 
-Configured via GitHub API (`gh api`):
+This entry documents the repeatable flow for onboarding a new AWS account into the platform.
 
-| Rule | Setting |
-|---|---|
-| Require pull request before merging | ✅ — no direct pushes to `main` |
-| Required approving reviews | 1 |
-| Dismiss stale reviews on new push | ✅ — re-approval required if the branch changes |
-| Required status checks | `Terraform Plan` must pass |
-| Require branches to be up to date | ✅ — branch must be current with `main` before merge |
-| Require linear history | ✅ — no merge commits, clean git log |
-| Allow force pushes | ❌ |
-| Allow deletions | ❌ |
-
-### Why this matters
-
-Every merge to `main` triggers `tf-apply.yml` which deploys real infrastructure. Without branch protection:
-- Bad commits could apply directly to infrastructure with no review
-- `tf-plan.yml` (plan-on-PR) would never fire — no plan output to review
-- The prod approval gate would be bypassed entirely
-
-### Agreed branching strategy going forward
-
-All changes — including account onboarding, module updates, and workflow changes — must go through a feature branch and PR.
-
-**Branch naming convention:**
-
-| Prefix | Use case | Example |
-|---|---|---|
-| `feat/` | New account, new module, new stack | `feat/onboard-public-api-stage-01` |
-| `fix/` | Bug fix in a module or stack | `fix/dev-vpc-nat-gateway` |
-| `chore/` | Tooling, version bumps, workflow tweaks | `chore/update-terragrunt-0.68` |
-
-**Day-to-day workflow:**
+#### 1. Create a feature branch
 
 ```bash
-# 1. Branch from latest main
-git checkout main && git pull
-git checkout -b feat/<description>
-
-# 2. Make changes and commit
-git add <files>
-git commit -m "feat: <description>"
-
-# 3. Push and open PR — tf-plan.yml fires automatically
-git push -u origin feat/<description>
-gh pr create --base main
-
-# 4. Review plan output posted as PR comment
-# 5. Get approval → merge → tf-apply.yml deploys dev → stage → prod
+git checkout -b feat/onboard-<account-name>
 ```
 
-> **Note:** The two bootstrap commits (`4cb3784`, `f16a880`) were made directly to `main` before branch protection was in place. All subsequent changes will follow the PR workflow.
+Keeps the change isolated and reviewable. All onboarding work is committed here before anything touches `main`.
+
+#### 2. Scaffold the account directory
+
+Under `terraform/live/aws/<ou>/<account-name>/`, create three files:
+
+| File | Purpose |
+|---|---|
+| `account.hcl` | Account metadata: `account_id`, `account_name`, `ou`, `aws_profile` |
+| `us-east-1/region.hcl` | Region declaration |
+| `us-east-1/vpc/terragrunt.hcl` | VPC baseline — CIDR must not overlap other accounts |
+
+Choose a non-overlapping CIDR. Convention so far:
+
+| Account | VPC CIDR |
+|---|---|
+| `public-web-app-dev-01` | `10.10.0.0/16` |
+| `network-dev` | `10.20.0.0/16` |
+
+Add additional stacks (EC2, EKS, TGW, etc.) under `us-east-1/` as required for the account's purpose.
+
+#### 3. Commit and push
+
+```bash
+git add terraform/live/aws/<ou>/<account-name>/
+git commit -m "feat: onboard <account-name> to <OU> OU"
+git push -u origin feat/onboard-<account-name>
+```
+
+#### 4. Open a Pull Request
+
+```bash
+gh pr create --title "feat: onboard <account-name> to <OU> OU" ...
+```
+
+Opening the PR automatically triggers `tf-plan.yml`, which:
+- Detects the changed stacks via `git diff`
+- Assumes the account-specific OIDC IAM role
+- Runs `terragrunt plan` and posts output as a PR comment
+
+Review the plan output before merging.
+
+#### 5. Post-merge bootstrap (one-time, per account)
+
+After the PR merges to `main`, complete the one-time account setup:
+
+1. Replace the `account_id` placeholder in `account.hcl` with the real 12-digit AWS account ID.
+2. Run the bootstrap script to create the S3 state bucket and DynamoDB lock table:
+   ```bash
+   ./scripts/bootstrap/bootstrap-account.sh <account-id> us-east-1 <aws-profile>
+   ```
+3. Create OIDC IAM roles in the new account:
+   - `github-actions-terraform` — apply, trust: `repo:*:ref:refs/heads/main`
+   - `github-actions-terraform-readonly` — plan, trust: `repo:*:*`
+4. Verify state backend connectivity:
+   ```bash
+   cd terraform/live/aws/<ou>/<account-name>/us-east-1/vpc
+   terragrunt plan
+   ```
+
+### What changed this session
+
+**New account: `network-dev`**
+
+| File | Purpose |
+|---|---|
+| `live/aws/dev/network-dev/account.hcl` | Account metadata, OU tag `dev` (account ID placeholder) |
+| `live/aws/dev/network-dev/us-east-1/region.hcl` | Region declaration |
+| `live/aws/dev/network-dev/us-east-1/vpc/terragrunt.hcl` | VPC — CIDR `10.20.0.0/16`, 2 AZs, public + private subnets |
+
+**Branch:** `feat/onboard-network-dev`
+**PR:** https://github.com/chifungleung/cloud-platform-engineering/pull/2
+
+### Next Steps
+
+- [ ] Replace placeholder account ID in `network-dev/account.hcl` with real account ID
+- [ ] Run bootstrap script for `network-dev`
+- [ ] Create OIDC IAM roles in `network-dev`
+- [ ] Add network-specific stacks (TGW, Route 53 Resolver, etc.) as needed
 
 ---
